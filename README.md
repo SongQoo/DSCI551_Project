@@ -452,9 +452,15 @@ Type `1`, `2`, or `3` and press ENTER to run a scenario. Type `0` to exit.
 **Key things to observe:**
 
 - Initial baseline: `dead_tuple_count = 0`.
+<<<<<<< HEAD
 - After workload: `dead_tuple_count = 500`, `dead_tuple_percent > 0%`.
 - VACUUM VERBOSE notices: 500 tuples removed, 500 dead item identifiers removed from indexes.
 - Post-VACUUM: `dead_tuple_count = 0`, free space recovered, `avg_leaf_density` drops from `~96%` back to `~58%`.
+=======
+- After workload: `dead_tuple_count = 500`, `dead_tuple_percent > N%`.
+- VACUUM VERBOSE notices: removed N dead row versions, index entries cleaned.
+- Post-VACUUM: `dead_tuple_count = 0`, free space recovered.
+>>>>>>> 39067e6adf6acd87db1a34b178f301b64166b6f0
 
 ---
 
