@@ -452,7 +452,7 @@ Type `1`, `2`, or `3` and press ENTER to run a scenario. Type `0` to exit.
 **Key things to observe:**
 
 - Initial baseline: `dead_tuple_count = 0`.
-- After workload: `dead_tuple_count = 500`, `dead_tuple_percent > 0%`.
+- After workload: `dead_tuple_count = 500`, `dead_tuple_percent > N%`.
 - VACUUM VERBOSE notices: removed N dead row versions, index entries cleaned.
 - Post-VACUUM: `dead_tuple_count = 0`, free space recovered.
 
