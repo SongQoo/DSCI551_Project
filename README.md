@@ -421,13 +421,13 @@ Type `1`, `2`, or `3` and press ENTER to run a scenario. Type `0` to exit.
 3. Writer 2 (background thread) attempts the same UPDATE → blocks on row lock.
 4. `pg_locks` output shows the blocking/blocked relationship.
 5. **Press ENTER** when prompted → Writer 1 commits.
-6. Writer 2 unblocks and completes (or fails because seat is no longer available).
+6. Writer 2 unblocks and completes → `UPDATE FAILED` (seat is no longer available).
 7. Final MVCC tuple chain printed via `heap_page_items()`.
 
 **Key things to observe:**
 
 - `[READER]` line shows `status: available` while Writer 1 is uncommitted.
-- `pg_locks` shows `granted = False` for Writer 2.
+- `pg_locks` shows `transactionid | ShareLock | False` for Writer 2 (waiting on Writer 1's XID).
 - Pre-commit CLOG status is `IN PROGRESS`; post-commit becomes `COMMITTED`.
 - Old and new tuple versions both visible in the heap.
 
@@ -453,14 +453,14 @@ Type `1`, `2`, or `3` and press ENTER to run a scenario. Type `0` to exit.
 
 - Initial baseline: `dead_tuple_count = 0`.
 - After workload: `dead_tuple_count = 500`, `dead_tuple_percent > 0%`.
-- VACUUM VERBOSE notices: removed N dead row versions, index entries cleaned.
-- Post-VACUUM: `dead_tuple_count = 0`, free space recovered.
+- VACUUM VERBOSE notices: 500 tuples removed, 500 dead item identifiers removed from indexes.
+- Post-VACUUM: `dead_tuple_count = 0`, free space recovered, `avg_leaf_density` drops from `~96%` back to `~58%`.
 
 ---
 
 ### Scenario C — VACUUM & Index-Only Scan Optimization
 
-**Demonstrates:** Before VACUUM, dirty Visibility Map (VM) bits force the planner to fetch heap pages even with an index. After VACUUM sets the VM bits, the planner switches to an Index-Only Scan (`Heap Fetches = 0`).
+**Demonstrates:** Before VACUUM, dirty Visibility Map (VM) bits force PostgreSQL to fetch heap pages on every index lookup (`Heap Fetches = 500`). After VACUUM sets the VM bits, heap I/O is eliminated entirely (`Heap Fetches = 0`) — both cases use `Index Only Scan`, but the execution time drops ~5×.
 
 **Run:** Select option `[3]` from the main menu.
 
@@ -469,19 +469,19 @@ Type `1`, `2`, or `3` and press ENTER to run a scenario. Type `0` to exit.
 1. All seats are updated → VM bits cleared (dirty state).
 2. `pg_visibility` output: all pages show `FALSE (Dirty)`.
 3. `EXPLAIN ANALYZE` on `SELECT status WHERE concert_id=1 AND status='available'`:
-   - Scan type: `Index Scan`
-   - `Heap Fetches: N` (non-zero)
+   - Scan type: `Index Only Scan`
+   - `Heap Fetches: 500` (heap I/O required — VM bits dirty)
 4. **Press ENTER** when prompted → `VACUUM ANALYZE` runs.
 5. `pg_visibility` output: all pages flip to `TRUE (Clean)`.
 6. `EXPLAIN ANALYZE` runs again:
    - Scan type: `Index Only Scan`
-   - `Heap Fetches: 0` (I/O optimized)
+   - `Heap Fetches: 0` (heap I/O eliminated)
 
 **Key things to observe:**
 
-- Pre-VACUUM: `Index Scan`, `Heap Fetches > 0`.
-- VM bits flip from `FALSE` to `TRUE` after VACUUM.
-- Post-VACUUM: `Index Only Scan`, `Heap Fetches = 0`.
+- Pre-VACUUM: `Index Only Scan`, `Heap Fetches: 500`, execution time `~0.6 ms`.
+- VM bits flip from `FALSE (Dirty)` to `TRUE (Clean)` after VACUUM.
+- Post-VACUUM: `Index Only Scan`, `Heap Fetches: 0`, execution time `~0.1 ms` (≈ 5× faster).
 
 ---
 
@@ -556,32 +556,34 @@ Select `[1]` from the main menu.
 | Initial state | `status: available`, `xmax: 0` |
 | Writer 1 updates (uncommitted) | CLOG shows `IN PROGRESS` for Writer 1's XID |
 | Reader queries during open transaction | `status: available` (pre-commit snapshot — unchanged) |
-| Writer 2 attempts same UPDATE | `pg_locks`: `granted = False` for Writer 2 |
+| Writer 2 attempts same UPDATE | `pg_locks`: `transactionid \| ShareLock \| False` — Writer 2 is waiting |
 | Press ENTER → Writer 1 commits | CLOG flips to `COMMITTED` |
-| Writer 2 unblocks | `UPDATE FAILED` (seat no longer available) or `UPDATE SUCCESSFUL` |
-| Final heap inspection | Two tuple versions visible: old (`xmax` set) + new (`xmin` = Writer 1's XID) |
+| Writer 2 unblocks | `[WRITER 2] !!! UPDATE FAILED !!! Reason: Seat is no longer AVAILABLE.` |
+| Final heap inspection | Two tuple versions visible: old (`xmax` set, `xmax_commit: True`) + new (`xmin` = Writer 1's XID, `xmin_commit: True`) |
 
 #### Scenario B — Heap & Index Bloat
 
 Select `[2]` from the main menu.
 
-| Step | What you should see |
-|---|---|
-| Initial baseline | `dead_tuple_count = 0`, `dead_tuple_percent = 0.00%` |
-| After 500-seat batch UPDATE | `dead_tuple_count = 500`, `dead_tuple_percent > 0%` |
-| After manual VACUUM | `dead_tuple_count = 0`, free space recovered |
-| VACUUM VERBOSE output | Reports N index entries removed, N heap pages cleaned |
+| Metric | Initial Baseline | Post-Workload | Post-VACUUM |
+|---|---|---|---|
+| `dead_tuple_count` | `0` | `500` | `0` |
+| `dead_tuple_percent` | `0.00%` | `> 0%` | `0.00%` |
+| `avg_leaf_density` | `~41%` | `~96%` (index packed) | `~58%` (index cleaned) |
+| VACUUM VERBOSE | — | — | Reports 500 tuples removed, 500 dead item identifiers removed from indexes |
 
 #### Scenario C — VACUUM & Index-Only Scan
 
 Select `[3]` from the main menu.
 
-| Step | What you should see |
-|---|---|
-| After bulk UPDATE (dirty VM) | All pages show `FALSE (Dirty)` in `pg_visibility` |
-| EXPLAIN ANALYZE (pre-VACUUM) | `Scan Methodology: Index Scan`, `Heap Fetches: N` (N > 0) |
-| After VACUUM ANALYZE | All pages flip to `TRUE (Clean)` in `pg_visibility` |
-| EXPLAIN ANALYZE (post-VACUUM) | `Scan Methodology: Index Only Scan`, `Heap Fetches: 0` |
+| Metric | Pre-VACUUM (Dirty VM) | Post-VACUUM (Clean VM) |
+|---|---|---|
+| VM state (all pages) | `FALSE (Dirty)` | `TRUE (Clean)` |
+| Scan Methodology | `Index Only Scan` | `Index Only Scan` |
+| `Heap Fetches` | `500` (heap I/O required) | `0` (heap I/O eliminated) |
+| Execution Time | `~0.6 ms` | `~0.1 ms` (≈ 5× faster) |
+
+> Note: Both pre- and post-VACUUM use `Index Only Scan`. The key difference is `Heap Fetches` dropping from 500 to 0 — with dirty VM bits, PostgreSQL must still visit the heap to verify tuple visibility even when using the index. After VACUUM sets the VM bits, heap I/O is eliminated entirely.
 
 ---
 
