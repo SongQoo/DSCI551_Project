@@ -25,7 +25,8 @@ ConcertRush is a Python CLI application that simulates a concurrent concert tick
 8. [Step 6 — Run the Application](#8-step-6--run-the-application)
 9. [Scenario Guide](#9-scenario-guide)
 10. [Dataset Information](#10-dataset-information)
-11. [Troubleshooting](#11-troubleshooting)
+11. [Reproducing Results](#11-reproducing-results)
+12. [Troubleshooting](#12-troubleshooting)
 
 ---
 
@@ -513,7 +514,78 @@ The synthetic dataset is also provided directly in this repository as `sql/conce
 
 ---
 
-## 11. Troubleshooting
+## 11. Reproducing Results
+
+Follow the steps below from a clean state to reproduce the results shown in the project report.
+
+### 11.1 Full Setup Walkthrough
+
+```bash
+# 1. Start PostgreSQL
+brew services start postgresql@16          # macOS Homebrew
+# sudo systemctl start postgresql          # Linux
+
+# 2. Clone the repository and install dependencies
+git clone https://github.com/SongQoo/DSCI551_Project
+cd ConcertRush
+pip install -r requirements.txt
+
+# 3. Run the data pipeline (creates DB + imports 500 seats)
+python setup_db.py
+
+# 4. Launch the application
+python main.py
+```
+
+To reset the database to its initial state at any time:
+
+```bash
+python setup_db.py --reset
+```
+
+---
+
+### 11.2 Expected Results per Scenario
+
+#### Scenario A — MVCC & Snapshot Isolation + Write Locking
+
+Select `[1]` from the main menu.
+
+| Step | What you should see |
+|---|---|
+| Initial state | `status: available`, `xmax: 0` |
+| Writer 1 updates (uncommitted) | CLOG shows `IN PROGRESS` for Writer 1's XID |
+| Reader queries during open transaction | `status: available` (pre-commit snapshot — unchanged) |
+| Writer 2 attempts same UPDATE | `pg_locks`: `granted = False` for Writer 2 |
+| Press ENTER → Writer 1 commits | CLOG flips to `COMMITTED` |
+| Writer 2 unblocks | `UPDATE FAILED` (seat no longer available) or `UPDATE SUCCESSFUL` |
+| Final heap inspection | Two tuple versions visible: old (`xmax` set) + new (`xmin` = Writer 1's XID) |
+
+#### Scenario B — Heap & Index Bloat
+
+Select `[2]` from the main menu.
+
+| Step | What you should see |
+|---|---|
+| Initial baseline | `dead_tuple_count = 0`, `dead_tuple_percent = 0.00%` |
+| After 500-seat batch UPDATE | `dead_tuple_count = 500`, `dead_tuple_percent > 0%` |
+| After manual VACUUM | `dead_tuple_count = 0`, free space recovered |
+| VACUUM VERBOSE output | Reports N index entries removed, N heap pages cleaned |
+
+#### Scenario C — VACUUM & Index-Only Scan
+
+Select `[3]` from the main menu.
+
+| Step | What you should see |
+|---|---|
+| After bulk UPDATE (dirty VM) | All pages show `FALSE (Dirty)` in `pg_visibility` |
+| EXPLAIN ANALYZE (pre-VACUUM) | `Scan Methodology: Index Scan`, `Heap Fetches: N` (N > 0) |
+| After VACUUM ANALYZE | All pages flip to `TRUE (Clean)` in `pg_visibility` |
+| EXPLAIN ANALYZE (post-VACUUM) | `Scan Methodology: Index Only Scan`, `Heap Fetches: 0` |
+
+---
+
+## 12. Troubleshooting
 
 ### `psycopg2.OperationalError: could not connect to server`
 
